@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>דשבורד ייעוץ ותכנון לימודים - הפקולטה להנדסה בר-אילן (תשפ"ז)</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-brand">
+            <a href="https://engineering.biu.ac.il/study-programs" target="_blank" rel="noopener noreferrer" class="brand-icon" title="אתר תוכניות הלימודים — הפקולטה להנדסה בר-אילן">🎓</a>
+            <div class="header-title-row">
+                <h1>
+                    <a id="header-main-link" href="https://engineering.biu.ac.il/study-programs" target="_blank" rel="noopener noreferrer" class="header-title-link" title="מעבר לעמוד תוכניות הלימודים הרשמי באתר הפקולטה להנדסה בר-אילן">
+                        דשבורד ייעוץ ותכנון לימודים — הפקולטה להנדסה בר-אילן <span class="external-link-icon">↗</span>
+                    </a>
+                </h1>
+                <a id="header-prereq-pdf-link" href="https://engineering.biu.ac.il/sites/engineering/files/shared/%D7%A8%D7%A9%D7%99%D7%9E%D7%AA-%D7%AA%D7%A0%D7%90%D7%99-%D7%A7%D7%93%D7%9D-%D7%91%D7%9E%D7%A2%D7%A8%D7%9B%D7%AA-%D7%AA%D7%A9%D7%A4%D7%96.pdf" target="_blank" rel="noopener noreferrer" class="header-pdf-link" title="פתיחת קובץ רשימת תנאי קדם במערכת תשפ״ז (PDF)">
+                    📄 תנאי קדם (PDF) <span class="external-link-icon">↗</span>
+                </a>
+                <a id="header-program-link" href="https://engineering.biu.ac.il/study-programs" target="_blank" rel="noopener noreferrer" class="header-prog-link" title="דף התוכנית הרשמי באתר הפקולטה">🔗 דף התוכנית ↗</a>
+                <div id="status-msg" class="status-badge" style="display:none;">טוען...</div>
+            </div>
+        </div>
+
+        <div class="header-left-cluster">
+            <div class="mode-switcher" role="group" aria-label="מצב עבודה">
+                <button id="btn-mode-normal" class="mode-btn active" onclick="setAppMode('normal')" title="מצב תכנון רגיל - הזזת קורסים גמישים בין הסמסטרים המותרים שלהם">
+                    📐 תכנון רגיל
+                </button>
+                <button id="btn-mode-sim" class="mode-btn mode-btn-sim" onclick="setAppMode('simulation')" title="מצב סימולציה - דחיית קורסים לשנים הבאות ועדכון אוטומטי של שרשרת תנאי הקדם">
+                    🧪 סימולציה
+                </button>
+            </div>
+
+            <div id="stats-summary" class="stats-summary-pill"></div>
+
+            <div class="header-actions">
+                <button class="btn-header btn-header-grades" onclick="triggerGradesUpload()" title="העלה גיליון ציונים (PDF) מאינ-בר לסימון אוטומטי של קורסים שעברו וחישוב ממוצע">📄 טען גיליון ציונים</button>
+                <input type="file" id="grades-pdf-input" style="display:none" onchange="handleGradesPdfUpload(event)" accept=".pdf">
+                <button class="btn-header" onclick="resetCurrentModePlacements()" title="אפס הזזות קורסים במצב הנוכחי">🔄 איפוס</button>
+                <button class="btn-header" onclick="window.print()" title="הדפסת תכנית הלימודים">🖨️ הדפס</button>
+                <button class="btn-header" onclick="exportProgress()" title="שמירת התקדמות ותכנון לקובץ">💾 ייצוא</button>
+                <button class="btn-header" onclick="triggerImport()" title="טעינת קובץ התקדמות שמור">📂 ייבוא</button>
+                <input type="file" id="import-input" style="display:none" onchange="importProgress(event)" accept=".json">
+            </div>
+        </div>
+    </header>
+
+    <!-- Row 2: Program, Search, Filters + View Tabs & Selection Actions (Single Row) -->
+    <section class="controls-bar">
+        <div class="controls-right-group">
+            <div class="control-group">
+                <label for="program-select" class="control-label">תוכנית:</label>
+                <select id="program-select" class="select-input">
+                    <option value="">בחר תוכנית...</option>
+                </select>
+            </div>
+
+            <div class="control-group search-group">
+                <input type="text" id="course-search" class="search-input" placeholder="חפש קורס (שם או קוד)...">
+                <button id="clear-search-btn" class="clear-search-btn" onclick="clearSearch()" title="נקה חיפוש" style="display:none;">✕</button>
+                <span class="search-icon">🔍</span>
+            </div>
+
+            <div class="control-group filter-pills">
+                <label class="checkbox-pill" title="הצג או הסתר קורסי בחירה במסלולים שנבחרו">
+                    <input type="checkbox" id="toggle-electives" checked onchange="onFilterChange()">
+                    <span>קורסי בחירה</span>
+                </label>
+                <label class="checkbox-pill" title="הצג או הסתר קורסים המסומנים כ'לא יינתן בתשפ״ז'">
+                    <input type="checkbox" id="toggle-not-offered" checked onchange="onFilterChange()">
+                    <span>לא נפתחים בתשפ"ז</span>
+                </label>
+            </div>
+        </div>
+
+        <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="graph" role="tab">🕸️ מפת קורסים</button>
+            <button class="tab" data-tab="list" role="tab">📋 רשימה</button>
+            <button class="tab" data-tab="stats" role="tab">📊 סיכום נ"ז</button>
+            <button class="tab" data-tab="grades" role="tab" id="tab-btn-grades">🎓 גיליון ציונים</button>
+            <button id="toggle-sidebar-btn" class="btn-toggle-sidebar" onclick="toggleDetailsSidebar()" title="הצג או הסתר את חלונית פרטי הקורס">
+                ℹ️ פרטי קורס
+            </button>
+            <button id="toolbar-clear-selection-btn" class="btn-clear-toolbar" onclick="clearAllSelections()" title="נקה בחירת קורס מודגש, סימוני השלמה וחיפוש (Esc)">
+                🧹 נקה בחירה
+            </button>
+        </div>
+    </section>
+
+    <!-- Row 3: Tracks (Right) + Visual Legend (Left) in One Compact Row -->
+    <div class="sub-toolbar">
+        <div class="tracks-row" id="tracks-row">
+            <span class="tracks-label">מסלולים:</span>
+            <div id="track-toggles" class="track-toggles"></div>
+            <div id="track-quick-actions" class="track-quick-actions"></div>
+        </div>
+
+        <div class="graph-legend" id="graph-legend">
+            <span class="legend-item"><span class="legend-swatch swatch-fixed"></span>קבוע</span>
+            <span class="legend-item" title="קורס שניתן לקחת במספר סמסטרים — גרור עם העכבר בין העמודות!"><span class="legend-swatch swatch-flex"></span>גמיש (⇄)</span>
+            <span class="legend-item"><span class="legend-swatch swatch-prereq"></span>קדם</span>
+            <span class="legend-item"><span class="legend-swatch swatch-dep"></span>המשך</span>
+            <span class="legend-item sim-only-legend" style="display:none;"><span class="legend-swatch swatch-sim-manual"></span>נדחה (📌)</span>
+            <span class="legend-item sim-only-legend" style="display:none;"><span class="legend-swatch swatch-sim-auto"></span>נגרר (⛓️)</span>
+            <span class="legend-item"><span class="legend-swatch swatch-done"></span>הושלם (✓)</span>
+        </div>
+    </div>
+
+    <!-- Simulation Mode Control Banner -->
+    <section id="simulation-banner" class="simulation-banner" style="display: none;">
+        <div class="sim-banner-main">
+            <div class="sim-title">
+                <span class="sim-badge-icon">🧪</span>
+                <strong>מצב סימולציה:</strong>
+                <span class="sim-instructions">גרור כל קורס לסמסטר מאוחר יותר — קורסי ההמשך יידחו אוטומטית!</span>
+            </div>
+            <div id="sim-metrics" class="sim-metrics"></div>
+            <div class="sim-controls">
+                <label class="sim-parity-toggle" title="כאשר מסומן, ניתן לדחות קורס לכל סמסטר עוקב (+1, +2...) ללא תלות בסמסטר א' (אי-זוגי) או סמסטר ב' (זוגי)">
+                    <input type="checkbox" id="sim-free-parity" onchange="onSimParityChange()">
+                    <span>אפשר דחייה לכל סמסטר עוקב (+1)</span>
+                </label>
+                <button class="btn-sim-add-sem" onclick="addSimulationSemesterColumns()" title="הוסף סמסטרים נוספים (שנה ה'/ו') לגרירה">➕ הוסף סמסטר</button>
+                <button class="btn-sim-reset" onclick="resetSimulation()" title="אפס את כל הדחיות בסימולציה">🔄 אפס סימולציה</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+        <div id="content" class="content-pane">
+            <div id="graph-view" class="view-container"></div>
+            <div id="list-view" class="view-container" style="display:none;"></div>
+            <div id="stats-view" class="view-container" style="display:none;"></div>
+            <div id="grades-view" class="view-container" style="display:none;"></div>
+            <div id="graph-tooltip" class="graph-tooltip"></div>
+        </div>
+        <div id="resizer" class="sidebar-resizer" title="גרור לשינוי רוחב חלונית הפרטים" style="display:none;"></div>
+        <aside id="details" class="details-sidebar" style="display:none;">
+            <div class="sidebar-header">
+                <h3>פרטי קורס וייעוץ</h3>
+                <div style="display:flex; gap:0.35rem;">
+                    <button id="clear-selection-btn" class="btn-clear-sel" onclick="clearSelectedCourse()" style="display:none;">נקה סימון</button>
+                    <button class="btn-clear-sel" onclick="toggleDetailsSidebar(false)" title="סגור חלונית פרטים להגדלת הגרף">✕ סגור</button>
+                </div>
+            </div>
+            <div id="details-content" class="details-content">
+                <div class="empty-details-placeholder">
+                    <div class="placeholder-icon">👆</div>
+                    <p><strong>בחר קורס במפה או ברשימה</strong> כדי לצפות בדרישות הקדם, קורסים חופפים, קורסי המשך ואפשרויות הזזה בין סמסטרים.</p>
+                    <hr>
+                    <div class="quick-tips">
+                        <h4>💡 טיפים לשימוש בדשבורד:</h4>
+                        <ul>
+                            <li><strong>קורסים בסגול (⇄):</strong> ניתנים ללימוד במספר סמסטרים. במצב רגיל, ניתן <strong>לגרור אותם עם העכבר</strong> בין עמודות הסמסטרים המותרים!</li>
+                            <li><strong>מצב סימולציה (🧪):</strong> לחץ על כפתור הסימולציה למעלה כדי לבדוק מה קורה אם דוחים קורס לשנה הבאה — כל הקורסים התלויים בו יזוזו אוטומטית.</li>
+                            <li><strong>סימון השלמה (✓):</strong> סמן קורסים שכבר עברת כדי לעקוב אחר נקודות זכות ולראות אילו קורסים פתוחים בפניך.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Floating Drag Ghost -->
+    <div id="drag-ghost" class="drag-ghost" style="display:none;"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
