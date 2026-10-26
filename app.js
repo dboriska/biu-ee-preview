@@ -1975,8 +1975,9 @@ function classifyGradeRaw(gradeRaw) {
     if (!g) {
         return { status: 'none', numeric: null, is_pass: false, is_graded: false };
     }
-    if (/^\d+(\.\d+)?$/.test(g)) {
-        const val = parseFloat(g);
+    const mNum = g.match(/^(\d+(\.\d+)?)(?:\s*נ)?$/);
+    if (mNum) {
+        const val = parseFloat(mNum[1]);
         const isPass = val >= 60.0;
         return {
             status: isPass ? 'pass' : 'fail',
@@ -1988,7 +1989,7 @@ function classifyGradeRaw(gradeRaw) {
     if (g.includes('עובר') || g.includes('פטור') || g.includes('זכאי')) {
         return { status: 'pass', numeric: null, is_pass: true, is_graded: true };
     }
-    if (g.includes('נכשל') || g.includes('לא עבר')) {
+    if (g === 'נ' || g.includes('נכשל') || g.includes('לא עבר')) {
         return { status: 'fail', numeric: null, is_pass: false, is_graded: true };
     }
     return { status: 'pending', numeric: null, is_pass: false, is_graded: true };
@@ -2022,14 +2023,83 @@ async function parseGradeSheetPdfBuffer(arrayBuffer) {
         rawLatin1 += String.fromCharCode(bytes[i]);
     }
 
-    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-    let match;
-    const streamSlices = [];
-    while ((match = streamRegex.exec(rawLatin1)) !== null) {
-        const startOffset = match.index + match[0].indexOf(match[1]);
-        const endOffset = startOffset + match[1].length;
-        streamSlices.push(bytes.subarray(startOffset, endOffset));
+    // Try resolving /Pages /Kids object hierarchy to combine multi-stream pages
+    let pageTexts = [];
+    try {
+        const pagesMatch = rawLatin1.match(/\/Pages\s+(\d+)\s+0\s+R/);
+        if (pagesMatch) {
+            const pagesId = pagesMatch[1];
+            const pagesObjMatch = rawLatin1.match(new RegExp(`\\b${pagesId}\\s+0\\s+obj([\\s\\S]*?)endobj`));
+            if (pagesObjMatch) {
+                const kidsMatch = pagesObjMatch[1].match(/\/Kids\s*\[([^\]]+)\]/);
+                if (kidsMatch) {
+                    const kidIds = [...kidsMatch[1].matchAll(/(\d+)\s+0\s+R/g)].map(m => m[1]);
+                    for (const kidId of kidIds) {
+                        const kidObjMatch = rawLatin1.match(new RegExp(`\\b${kidId}\\s+0\\s+obj([\\s\\S]*?)endobj`));
+                        if (!kidObjMatch) continue;
+                        const contMatch = kidObjMatch[1].match(/\/Contents\s*(\[[^\]]+\]|\d+\s+0\s+R)/);
+                        if (!contMatch) continue;
+                        const streamIds = [...contMatch[1].matchAll(/(\d+)\s+0\s+R/g)].map(m => m[1]);
+                        const chunks = [];
+                        for (const sid of streamIds) {
+                            const sHeaderRegex = new RegExp(`\\b${sid}\\s+0\\s+obj[\\s\\S]*?stream\\r?\\n`);
+                            const sMatch = sHeaderRegex.exec(rawLatin1);
+                            if (!sMatch) continue;
+                            const startOffset = sMatch.index + sMatch[0].length;
+                            const endOffset = rawLatin1.indexOf('endstream', startOffset);
+                            if (endOffset === -1) continue;
+                            let actualEnd = endOffset;
+                            while (actualEnd > startOffset && (bytes[actualEnd - 1] === 10 || bytes[actualEnd - 1] === 13)) {
+                                actualEnd--;
+                            }
+                            const slice = bytes.subarray(startOffset, actualEnd);
+                            const dec = await decompressPdfStream(slice);
+                            if (dec) chunks.push(dec);
+                        }
+                        if (chunks.length) pageTexts.push(chunks.join('\n'));
+                    }
+                }
+            }
+        }
+    } catch (_) {}
+
+    // Fallback to raw stream regex if /Pages hierarchy could not be traversed
+    if (pageTexts.length === 0) {
+        const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+        let match;
+        const streamSlices = [];
+        while ((match = streamRegex.exec(rawLatin1)) !== null) {
+            const startOffset = match.index + match[0].indexOf(match[1]);
+            const endOffset = startOffset + match[1].length;
+            streamSlices.push(bytes.subarray(startOffset, endOffset));
+        }
+        for (const slice of streamSlices) {
+            const dec = await decompressPdfStream(slice);
+            if (dec && dec.includes('Td')) pageTexts.push(dec);
+        }
     }
+
+    const pagesItems = [];
+    const allTokens = [];
+    const tdRegex = /([0-9.]+)\s+([0-9.]+)\s+Td\s+(<[^>]+>|\([^)]*\))\s+Tj/g;
+    for (const pText of pageTexts) {
+        const items = [];
+        let m;
+        while ((m = tdRegex.exec(pText)) !== null) {
+            const x = parseFloat(m[1]);
+            const y = parseFloat(m[2]);
+            const text = decodePdfToken(m[3]);
+            if (text) {
+                items.push({ x, y, text });
+                allTokens.push(text);
+            }
+        }
+        pagesItems.push(items);
+    }
+
+    const isFormatB = allTokens.some(t =>
+        t.includes('גיליון ציונים') || t.includes('מפגש') || t.includes('שנה"ל') || t.includes('מס  זיהוי') || t.includes('מס זיהוי')
+    );
 
     let studentName = '';
     let studentId = '';
@@ -2038,23 +2108,10 @@ async function parseGradeSheetPdfBuffer(arrayBuffer) {
     let currentYear = '';
     let yearOrder = 0;
     const seenYears = {};
+
     let pageNum = 0;
-
-    for (const slice of streamSlices) {
-        const dec = await decompressPdfStream(slice);
-        if (!dec || !dec.includes('Td')) continue;
-
+    for (const items of pagesItems) {
         pageNum += 1;
-        const items = [];
-        const tdRegex = /([0-9.]+)\s+([0-9.]+)\s+Td\s+(<[^>]+>|\([^)]*\))\s+Tj/g;
-        let m;
-        while ((m = tdRegex.exec(dec)) !== null) {
-            const x = parseFloat(m[1]);
-            const y = parseFloat(m[2]);
-            const text = decodePdfToken(m[3]);
-            items.push({ x, y, text });
-        }
-
         const rowsMap = new Map();
         for (const item of items) {
             let matchedY = null;
@@ -2076,68 +2133,129 @@ async function parseGradeSheetPdfBuffer(arrayBuffer) {
             const rowItems = rowsMap.get(yk).sort((a, b) => b.x - a.x);
             const fullLine = rowItems.map(t => t.text).filter(Boolean).join(' ').trim();
 
-            if (fullLine.includes('שם הסטודנט') || fullLine.includes('תעודת זהות')) {
-                for (const it of rowItems) {
-                    if (/^\d{8,9}$/.test(it.text)) {
-                        studentId = it.text;
-                    } else if (it.text.includes('שם הסטודנט')) {
-                        const parts = it.text.split(':');
-                        studentName = parts[parts.length - 1].trim();
-                    }
-                }
-                continue;
-            }
-
             if (!reportDate) {
                 const mDate = fullLine.match(/\b\d{2}\/\d{2}\/\d{4}\b/);
                 if (mDate) reportDate = mDate[0];
             }
 
-            if (fullLine.startsWith('שנה ')) {
-                currentYear = fullLine.replace('שנה ', '').trim();
-                if (!seenYears[currentYear]) {
+            if (isFormatB) {
+                // Format B: Official BIU Transcript
+                if (fullLine.includes('מס  זיהוי:') || fullLine.includes('מס זיהוי:')) {
+                    for (const it of rowItems) {
+                        if (/^\d{8,9}$/.test(it.text)) studentId = it.text;
+                    }
+                    const mName = fullLine.match(/שם:\s*([^\d:]+?)(?:\s+מס\s+זיהוי:|$)/);
+                    if (mName && !studentName) studentName = mName[1].trim();
+                    continue;
+                }
+
+                let cCode = null;
+                for (const it of rowItems) {
+                    if (it.x >= 460 && it.x <= 505 && /^\d{5}$/.test(it.text)) {
+                        cCode = it.text;
+                        break;
+                    }
+                }
+                if (!cCode) continue;
+
+                const yearParts = rowItems.filter(it => it.x > 510 && it.text).map(it => it.text);
+                const mtypeParts = rowItems.filter(it => it.x >= 395 && it.x <= 455 && it.text).map(it => it.text);
+                const nameParts = rowItems.filter(it => it.x >= 170 && it.x < 395 && it.text).map(it => it.text);
+                const credParts = rowItems.filter(it => it.x >= 70 && it.x <= 95 && /^\d+(\.\d+)?$/.test(it.text)).map(it => it.text);
+                const gradeParts = rowItems.filter(it => it.x < 70 && it.text).map(it => it.text);
+
+                const rowYear = yearParts.length ? yearParts[0] : currentYear;
+                if (rowYear && !seenYears[rowYear]) {
                     yearOrder += 1;
-                    seenYears[currentYear] = yearOrder;
+                    seenYears[rowYear] = yearOrder;
                 }
-                continue;
-            }
 
-            let codeItem = null;
-            for (const it of rowItems) {
-                if (it.x >= 220 && it.x <= 300 && /^\d{5}-\d{2}$/.test(it.text)) {
-                    codeItem = it.text;
-                    break;
+                const mtype = mtypeParts.length ? mtypeParts[0] : '';
+                const gradeRaw = gradeParts.join(' ').trim();
+                const gInfo = classifyGradeRaw(gradeRaw);
+                const creds = credParts.length ? parseFloat(credParts[0]) || 0 : 0;
+                const codeSuffix = mtype || '01';
+                const gnum = mtype.includes('הרצאה') ? 1 : (mtype.includes('תרגיל') ? 2 : 3);
+
+                rawRows.push({
+                    row_index: rawRows.length + 1,
+                    page: pageNum,
+                    year: rowYear,
+                    year_idx: seenYears[rowYear] || 0,
+                    full_code: `${cCode}-${codeSuffix}`,
+                    course_code: cCode,
+                    group_code: codeSuffix,
+                    group_num: gnum,
+                    name_he: nameParts.join(' '),
+                    hours: creds,
+                    credits: creds,
+                    grade_raw: gradeRaw,
+                    status: gInfo.status,
+                    numeric_grade: gInfo.numeric,
+                    is_pass: gInfo.is_pass,
+                    has_grade: gInfo.is_graded
+                });
+
+            } else {
+                // Format A: Inbar Course-Group Grade List
+                if (fullLine.includes('שם הסטודנט') || fullLine.includes('תעודת זהות')) {
+                    for (const it of rowItems) {
+                        if (/^\d{8,9}$/.test(it.text)) {
+                            studentId = it.text;
+                        } else if (it.text.includes('שם הסטודנט')) {
+                            const parts = it.text.split(':');
+                            studentName = parts[parts.length - 1].trim();
+                        }
+                    }
+                    continue;
                 }
+
+                if (fullLine.startsWith('שנה ')) {
+                    currentYear = fullLine.replace('שנה ', '').trim();
+                    if (!seenYears[currentYear]) {
+                        yearOrder += 1;
+                        seenYears[currentYear] = yearOrder;
+                    }
+                    continue;
+                }
+
+                let codeItem = null;
+                for (const it of rowItems) {
+                    if (it.x >= 220 && it.x <= 300 && /^\d{5}-\d{2}$/.test(it.text)) {
+                        codeItem = it.text;
+                        break;
+                    }
+                }
+                if (!codeItem) continue;
+
+                const [cCode, gCode] = codeItem.split('-');
+                const nameParts = rowItems.filter(it => it.x > 300 && it.text).map(it => it.text);
+                const hoursParts = rowItems.filter(it => it.x >= 165 && it.x < 220 && it.text).map(it => it.text);
+                const credParts = rowItems.filter(it => it.x >= 112 && it.x < 165 && it.text).map(it => it.text);
+                const gradeParts = rowItems.filter(it => it.x < 112 && it.text).map(it => it.text);
+
+                const gradeRaw = gradeParts.join(' ').trim();
+                const gInfo = classifyGradeRaw(gradeRaw);
+
+                rawRows.push({
+                    row_index: rawRows.length + 1,
+                    page: pageNum,
+                    year: currentYear,
+                    year_idx: seenYears[currentYear] || 0,
+                    full_code: codeItem,
+                    course_code: cCode,
+                    group_code: gCode,
+                    group_num: parseInt(gCode, 10),
+                    name_he: nameParts.join(' '),
+                    hours: hoursParts.length ? parseFloat(hoursParts[0]) || 0 : 0,
+                    credits: credParts.length ? parseFloat(credParts[0]) || 0 : 0,
+                    grade_raw: gradeRaw,
+                    status: gInfo.status,
+                    numeric_grade: gInfo.numeric,
+                    is_pass: gInfo.is_pass,
+                    has_grade: gInfo.is_graded
+                });
             }
-            if (!codeItem) continue;
-
-            const [cCode, gCode] = codeItem.split('-');
-            const nameParts = rowItems.filter(it => it.x > 300 && it.text).map(it => it.text);
-            const hoursParts = rowItems.filter(it => it.x >= 165 && it.x < 220 && it.text).map(it => it.text);
-            const credParts = rowItems.filter(it => it.x >= 112 && it.x < 165 && it.text).map(it => it.text);
-            const gradeParts = rowItems.filter(it => it.x < 112 && it.text).map(it => it.text);
-
-            const gradeRaw = gradeParts.join(' ').trim();
-            const gInfo = classifyGradeRaw(gradeRaw);
-
-            rawRows.push({
-                row_index: rawRows.length + 1,
-                page: pageNum,
-                year: currentYear,
-                year_idx: seenYears[currentYear] || 0,
-                full_code: codeItem,
-                course_code: cCode,
-                group_code: gCode,
-                group_num: parseInt(gCode, 10),
-                name_he: nameParts.join(' '),
-                hours: hoursParts.length ? parseFloat(hoursParts[0]) || 0 : 0,
-                credits: credParts.length ? parseFloat(credParts[0]) || 0 : 0,
-                grade_raw: gradeRaw,
-                status: gInfo.status,
-                numeric_grade: gInfo.numeric,
-                is_pass: gInfo.is_pass,
-                has_grade: gInfo.is_graded
-            });
         }
     }
 
